@@ -1,0 +1,7 @@
+{
+  "name": "ATChat",
+  "description": "A modern, real-time mobile chat application featuring user authentication, online status tracking, and seamless messaging. Built with React and optimized for a high-quality mobile-first experience.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
