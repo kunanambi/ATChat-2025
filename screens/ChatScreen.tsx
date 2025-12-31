@@ -16,122 +16,164 @@ const COMMON_EMOJIS = ['❤️', '👍', '😂', '😮', '😢', '🔥'];
 export const ChatScreen: React.FC<ChatProps> = ({ currentUser, chatUser, onBack }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
-  const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
-  const [isPartnerTyping, setIsPartnerTyping] = useState(false);
+  const [reactingToId, setReactingToId] = useState<string | null>(null);
+  const [isSending, setIsSending] = useState(false);
+  const [isAiTyping, setIsAiTyping] = useState(false);
+  
   const scrollRef = useRef<HTMLDivElement>(null);
-  const lastTap = useRef<{ id: string, time: number } | null>(null);
-  // Fixed: Replaced NodeJS.Timeout with ReturnType<typeof setTimeout> to fix "Cannot find namespace 'NodeJS'" error in browser environments.
-  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastMessageTimeRef = useRef<string | null>(null);
 
-  // Stable channel ID for both participants
-  const channelId = [currentUser.id, chatUser.id].sort().join(':');
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior
+      });
+    }
+  };
 
   const markAsRead = useCallback(async () => {
     try {
-      const { error } = await supabase
+      await supabase
         .from('messages')
         .update({ is_read: true })
         .eq('sender_id', chatUser.id)
         .eq('receiver_id', currentUser.id)
         .eq('is_read', false);
-
-      if (error) console.error("Error marking messages as read:", error);
-    } catch (err) {
-      console.error("Failed to update read status:", err);
-    }
+    } catch (err) {}
   }, [chatUser.id, currentUser.id]);
 
-  useEffect(() => {
-    const fetchMessages = async () => {
-      const { data } = await supabase
+  const fetchMessages = useCallback(async (isFirstLoad = false) => {
+    try {
+      let query = supabase
         .from('messages')
         .select('*')
         .or(`and(sender_id.eq.${currentUser.id},receiver_id.eq.${chatUser.id}),and(sender_id.eq.${chatUser.id},receiver_id.eq.${currentUser.id})`)
         .order('created_at', { ascending: true });
-      if (data) {
-        setMessages(data);
-        markAsRead();
+
+      if (!isFirstLoad && lastMessageTimeRef.current) {
+        query = query.gt('created_at', lastMessageTimeRef.current);
       }
-    };
 
-    fetchMessages();
+      const { data } = await query;
+      
+      if (data && data.length > 0) {
+        const hasNew = isFirstLoad || data.some(m => !lastMessageTimeRef.current || m.created_at > lastMessageTimeRef.current);
 
-    const channel = supabase.channel(`chat:${channelId}`)
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'messages'
-      }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          const msg = payload.new as Message;
-          const isRelevant = (msg.sender_id === chatUser.id && msg.receiver_id === currentUser.id) || 
-                             (msg.sender_id === currentUser.id && msg.receiver_id === chatUser.id);
+        setMessages(prev => {
+          const existingIds = new Set(prev.map(m => m.id));
+          const newMsgsFromUpdate = data.filter(d => !existingIds.has(d.id));
+          const updatedMsgs = data.filter(d => existingIds.has(d.id));
           
-          if (isRelevant) {
-            setMessages(prev => {
-              if (prev.find(m => m.id === msg.id)) return prev;
-              return [...prev, msg];
-            });
-            if (msg.receiver_id === currentUser.id) {
-              markAsRead();
-            }
-          }
-        } else if (payload.eventType === 'UPDATE') {
-          const updatedMsg = payload.new as Message;
-          setMessages(prev => prev.map(m => 
-            m.id === updatedMsg.id 
-              ? { ...m, ...updatedMsg, reactions: updatedMsg.reactions || m.reactions } 
-              : m
-          ));
-        }
-      })
-      .on('broadcast', { event: 'typing' }, (payload) => {
-        if (payload.payload.userId === chatUser.id) {
-          setIsPartnerTyping(true);
-          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-          typingTimeoutRef.current = setTimeout(() => {
-            setIsPartnerTyping(false);
-          }, 3000);
-        }
-      })
-      .subscribe();
+          let result = [...prev];
+          updatedMsgs.forEach(updated => {
+            const idx = result.findIndex(m => m.id === updated.id);
+            if (idx !== -1) result[idx] = updated;
+          });
+          
+          result = [...result, ...newMsgsFromUpdate].sort((a, b) => 
+            new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          );
+          
+          lastMessageTimeRef.current = result[result.length - 1].created_at;
+          return result;
+        });
 
-    return () => {
-      supabase.removeChannel(channel);
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    };
-  }, [currentUser.id, chatUser.id, markAsRead, channelId]);
+        if (data.some(m => m.sender_id === chatUser.id)) markAsRead();
+        if (hasNew) setTimeout(() => scrollToBottom(isFirstLoad ? 'auto' : 'smooth'), 100);
+      }
+    } catch (err) {
+      console.error("Fetch error:", err);
+    }
+  }, [currentUser.id, chatUser.id, markAsRead]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({
-        top: scrollRef.current.scrollHeight,
-        behavior: 'smooth'
+    fetchMessages(true);
+    markAsRead();
+    const interval = setInterval(() => fetchMessages(false), 4000); 
+    return () => clearInterval(interval);
+  }, [fetchMessages, markAsRead]);
+
+  const triggerGeminiResponse = async (userContent: string) => {
+    setIsAiTyping(true);
+    try {
+      // 1. Hakikisha Gemini Profile ipo kwenye database (kuepuka foreign key error)
+      await supabase.from('profiles').upsert({
+        id: 'gemini',
+        username: 'Gemini AI Assistant',
+        email: 'ai@gemini.com',
+        is_online: true,
+        last_seen: new Date().toISOString()
       });
+
+      // 2. Tayarisha historia safi (lazima ianze na 'user' na kufuata mfuatano sahihi)
+      const chatHistory: any[] = [];
+      const recentMessages = messages.slice(-6).filter(m => !m.id.startsWith('temp-'));
+      
+      recentMessages.forEach((m, idx) => {
+        const role = m.sender_id === currentUser.id ? 'user' : 'model';
+        // Hakikisha hatutumi roles mbili zinazofanana mfululizo (API Rule)
+        if (chatHistory.length === 0 || chatHistory[chatHistory.length - 1].role !== role) {
+          chatHistory.push({
+            role: role,
+            parts: [{ text: m.content }]
+          });
+        }
+      });
+
+      // Lazima iwe mfuatano wa user -> model -> user
+      if (chatHistory.length > 0 && chatHistory[chatHistory.length - 1].role === 'user') {
+        // Ikiwa ya mwisho ilikuwa user, Gemini anatarajia iwe ni prompt yetu ya sasa
+        chatHistory.pop();
+      }
+
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [...chatHistory, { role: 'user', parts: [{ text: userContent }] }],
+        config: { 
+          systemInstruction: "Wewe ni ATChat Assistant rasmi. Jibu kwa Kiswahili na Kiingereza kidogo. Majibu yawe mafupi na ya kirafiki sana." 
+        }
+      });
+
+      if (response.text) {
+        const { error: insertError } = await supabase.from('messages').insert({
+          sender_id: 'gemini',
+          receiver_id: currentUser.id,
+          content: response.text,
+          is_read: false,
+          reactions: {}
+        });
+
+        if (insertError) {
+          console.error("Database Insert Error:", insertError);
+          // Jaribio la pili bila reactions ikiwa column haipo
+          await supabase.from('messages').insert({
+            sender_id: 'gemini',
+            receiver_id: currentUser.id,
+            content: response.text,
+            is_read: false
+          });
+        }
+        
+        fetchMessages(false);
+      }
+    } catch (err) {
+      console.error("Gemini Assistant Failure:", err);
+    } finally {
+      setIsAiTyping(false);
     }
-  }, [messages, isPartnerTyping]);
-
-  const sendTypingStatus = useCallback(() => {
-    supabase.channel(`chat:${channelId}`).send({
-      type: 'broadcast',
-      event: 'typing',
-      payload: { userId: currentUser.id },
-    });
-  }, [currentUser.id, channelId]);
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setNewMessage(e.target.value);
-    sendTypingStatus();
   };
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim()) return;
+    const content = newMessage.trim();
+    if (!content || isSending) return;
     
-    const content = newMessage;
     setNewMessage('');
+    setIsSending(true);
 
-    const tempId = 'temp-' + Math.random().toString(36).substring(7);
+    const tempId = `temp-${Date.now()}`;
     const optimisticMsg: Message = {
       id: tempId,
       sender_id: currentUser.id,
@@ -143,6 +185,7 @@ export const ChatScreen: React.FC<ChatProps> = ({ currentUser, chatUser, onBack 
     };
     
     setMessages(prev => [...prev, optimisticMsg]);
+    setTimeout(() => scrollToBottom(), 10);
     
     try {
       const { data, error } = await supabase.from('messages').insert({
@@ -153,227 +196,138 @@ export const ChatScreen: React.FC<ChatProps> = ({ currentUser, chatUser, onBack 
         reactions: {}
       }).select().single();
 
-      if (!error && data) {
-        setMessages(prev => prev.map(m => m.id === tempId ? data : m));
-      }
-    } catch (err) {
-      console.error("Failed to send message:", err);
-    }
-
-    if (chatUser.id === 'gemini') {
-      try {
-        // Initialize Gemini AI client with the provided API key from environment variables.
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const history = messages.slice(-10).map(msg => ({
-          role: msg.sender_id === currentUser.id ? 'user' : 'model' as const,
-          parts: [{ text: msg.content }]
-        }));
-        history.push({ role: 'user', parts: [{ text: content }] });
-
-        // Generate content from the model 'gemini-3-flash-preview' with chat history.
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: history,
-          config: {
-            systemInstruction: "You are Gemini AI Assistant. Be conversational, helpful, and concise."
-          }
-        });
-
-        // Extract the generated text from the response using the .text property.
-        const aiText = response.text;
-        if (aiText) {
-          const { data: aiMsg } = await supabase.from('messages').insert({
-            sender_id: chatUser.id,
-            receiver_id: currentUser.id,
-            content: aiText,
-            is_read: true,
-            reactions: {}
+      if (error) {
+        if (error.code === '42703' || error.message.includes('reactions')) {
+           const { data: fallbackData } = await supabase.from('messages').insert({
+            sender_id: currentUser.id,
+            receiver_id: chatUser.id,
+            content,
+            is_read: false
           }).select().single();
-
-          if (aiMsg) {
-            setMessages(prev => [...prev, aiMsg]);
+          
+          if (fallbackData) {
+            setMessages(prev => prev.map(m => m.id === tempId ? { ...fallbackData, reactions: {} } : m));
+            lastMessageTimeRef.current = fallbackData.created_at;
           }
-        }
-      } catch (error) {
-        console.error("Gemini API Error:", error);
+        } else throw error;
+      } else if (data) {
+        setMessages(prev => prev.map(m => m.id === tempId ? data : m));
+        lastMessageTimeRef.current = data.created_at;
       }
+
+      if (chatUser.id === 'gemini') {
+        triggerGeminiResponse(content);
+      }
+    } catch (err: any) {
+      console.error("Send error:", err);
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+      setNewMessage(content); 
+    } finally {
+      setIsSending(false);
     }
   };
 
-  const handleReaction = async (msgId: string, emoji: string) => {
-    const msg = messages.find(m => m.id === msgId);
-    if (!msg) return;
+  const handleReaction = async (messageId: string, emoji: string) => {
+    const msg = messages.find(m => m.id === messageId);
+    if (!msg || messageId.startsWith('temp-')) return;
 
     const currentReactions = { ...(msg.reactions || {}) };
-    const userIds = [...(currentReactions[emoji] || [])];
-    
-    let newUserIds: string[];
-    if (userIds.includes(currentUser.id)) {
-      newUserIds = userIds.filter(id => id !== currentUser.id);
-    } else {
-      newUserIds = [...userIds, currentUser.id];
-    }
+    const userList = (currentReactions[emoji] as string[]) || [];
+    const hasReacted = userList.includes(currentUser.id);
 
-    if (newUserIds.length === 0) {
-      delete currentReactions[emoji];
-    } else {
-      currentReactions[emoji] = newUserIds;
-    }
+    let newUserList = hasReacted ? userList.filter(id => id !== currentUser.id) : [...userList, currentUser.id];
+    if (newUserList.length === 0) delete currentReactions[emoji];
+    else currentReactions[emoji] = newUserList;
 
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, reactions: currentReactions } : m));
-    setSelectedMsgId(null);
-
+    setMessages(prev => prev.map(m => m.id === messageId ? { ...m, reactions: currentReactions } : m));
+    setReactingToId(null);
     try {
-      const { error } = await supabase
-        .from('messages')
-        .update({ reactions: currentReactions })
-        .eq('id', msgId);
-      
-      if (error) console.error("Failed to sync reaction:", error);
-    } catch (err) {
-      console.error("Failed to update reaction:", err);
-    }
-  };
-
-  const handleMessageClick = (msgId: string) => {
-    const now = Date.now();
-    if (lastTap.current && lastTap.current.id === msgId && (now - lastTap.current.time) < 300) {
-      handleReaction(msgId, '❤️');
-      lastTap.current = null;
-    } else {
-      setSelectedMsgId(selectedMsgId === msgId ? null : msgId);
-      lastTap.current = { id: msgId, time: now };
-    }
+      await supabase.from('messages').update({ reactions: currentReactions }).eq('id', messageId);
+    } catch (err) {}
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#f8f9fa] dark:bg-slate-950 transition-colors" onClick={() => setSelectedMsgId(null)}>
+    <div className="flex flex-col h-screen bg-[#f8f9fa] dark:bg-slate-950 overflow-hidden" onClick={() => setReactingToId(null)}>
       <Header 
         title={chatUser.username}
-        subtitle={isPartnerTyping ? `${chatUser.username} is typing...` : (chatUser.is_online ? 'Active now' : 'Offline')}
-        leftAction={<button onClick={onBack} className="p-2 text-indigo-700 dark:text-indigo-400 active:scale-90 transition-transform"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M15 19l-7-7 7-7"></path></svg></button>}
+        subtitle={chatUser.is_online ? '• Online' : '• Offline'}
+        leftAction={<button onClick={onBack} className="p-2 text-[#1B273F] dark:text-slate-100"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="3"><path d="M15 19l-7-7 7-7"></path></svg></button>}
         rightAction={<Avatar name={chatUser.username} imageUrl={chatUser.avatar_url} isOnline={chatUser.is_online} size="sm" />}
       />
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
-        {messages.map((msg, index) => {
+        {messages.map((msg) => {
           const isMine = msg.sender_id === currentUser.id;
+          const isTemp = msg.id.startsWith('temp-');
           const reactions = msg.reactions || {};
-          const hasReactions = Object.keys(reactions).length > 0;
-          const isAtTop = index < 2;
+          const reactionEntries = Object.entries(reactions);
 
           return (
-            <div 
-              key={msg.id} 
-              className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} animate-in fade-in slide-in-from-bottom-1 duration-300 relative`}
-            >
-              <div 
-                className="relative group cursor-pointer max-w-[85%]"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleMessageClick(msg.id);
-                }}
-              >
-                {/* Emoji Picker */}
-                {selectedMsgId === msg.id && (
-                  <div className={`absolute z-30 ${isAtTop ? 'top-full mt-2' : '-top-14'} ${isMine ? 'right-0' : 'left-0'} flex gap-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-2 rounded-2xl shadow-2xl border border-indigo-50 dark:border-slate-800 animate-in zoom-in-75 duration-200 origin-bottom`}>
+            <div key={msg.id} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'} animate-fade-in relative`}>
+              <div className="relative">
+                <div 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!isTemp) setReactingToId(reactingToId === msg.id ? null : msg.id);
+                  }}
+                  className={`max-w-[75vw] md:max-w-md px-4 py-3 rounded-2xl text-[15px] font-medium shadow-sm cursor-pointer transition-all active:scale-[0.98] ${
+                    isMine ? 'bg-[#00D1C1] text-white rounded-tr-none' : 'bg-white dark:bg-slate-900 text-[#1B273F] dark:text-slate-100 border border-slate-100 dark:border-slate-800 rounded-tl-none'
+                  }`}
+                >
+                  {msg.content}
+                </div>
+                {reactingToId === msg.id && (
+                  <div className={`absolute bottom-full mb-2 z-50 flex gap-1 p-1.5 bg-white dark:bg-slate-800 rounded-full shadow-2xl border border-slate-100 dark:border-slate-700 animate-scale-up ${isMine ? 'right-0' : 'left-0'}`}>
                     {COMMON_EMOJIS.map(emoji => (
-                      <button 
-                        key={emoji}
-                        onClick={(e) => { e.stopPropagation(); handleReaction(msg.id, emoji); }}
-                        className={`w-10 h-10 flex items-center justify-center text-xl hover:scale-125 hover:-translate-y-1 active:scale-150 transition-all rounded-xl ${reactions[emoji]?.includes(currentUser.id) ? 'bg-indigo-50 dark:bg-indigo-900/40 border border-indigo-100 dark:border-indigo-500/30' : ''}`}
-                      >
+                      <button key={emoji} onClick={(e) => { e.stopPropagation(); handleReaction(msg.id, emoji); }} className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-50 dark:hover:bg-slate-700 text-lg">
                         {emoji}
                       </button>
                     ))}
                   </div>
                 )}
-
-                <div className={`px-4 py-2.5 rounded-2xl text-[16px] font-medium leading-relaxed transition-all relative shadow-sm border ${
-                  isMine 
-                    ? 'bg-indigo-600 text-white border-transparent rounded-tr-none shadow-indigo-200/40 dark:shadow-none' 
-                    : 'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border-slate-100 dark:border-slate-800 rounded-tl-none'
-                } ${selectedMsgId === msg.id ? 'ring-2 ring-indigo-400/50 scale-[0.98]' : ''}`}>
-                  {msg.content}
-                  
-                  {hasReactions && (
-                    <div className={`absolute -bottom-3 ${isMine ? 'right-1' : 'left-1'} flex flex-wrap gap-1 z-10`}>
-                      {Object.entries(reactions).map(([emoji, users]) => {
-                        const userList = users as string[];
-                        const didIReact = userList.includes(currentUser.id);
-                        return (
-                          <button 
-                            key={emoji} 
-                            className={`flex items-center gap-1 bg-white dark:bg-slate-800 border rounded-full px-2 py-0.5 shadow-md text-[12px] font-black animate-in zoom-in duration-300 active:scale-125 transition-transform ${didIReact ? 'border-indigo-400 text-indigo-600 dark:text-indigo-400' : 'border-slate-100 dark:border-slate-700 text-slate-500 dark:text-slate-400'}`}
-                            onClick={(e) => { e.stopPropagation(); handleReaction(msg.id, emoji); }}
-                          >
-                            <span>{emoji}</span>
-                            {userList.length > 1 && <span className="text-[10px]">{userList.length}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
               </div>
-
-              <div className={`flex items-center gap-1.5 mt-1.5 px-1.5 ${isMine ? 'flex-row-reverse' : ''}`}>
-                <span className={`text-[10px] font-bold uppercase tracking-wider ${isMine ? 'text-indigo-400/70 dark:text-indigo-800/80' : 'text-slate-400 dark:text-slate-600'}`}>
-                  {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              {reactionEntries.length > 0 && (
+                <div className={`flex flex-wrap gap-1 mt-1 ${isMine ? 'flex-row-reverse' : 'flex-row'}`}>
+                  {reactionEntries.map(([emoji, users]) => (
+                    <button key={emoji} onClick={(e) => { e.stopPropagation(); handleReaction(msg.id, emoji); }} className={`px-2 py-0.5 rounded-full text-[10px] font-bold shadow-sm transition-all border ${(users as string[]).includes(currentUser.id) ? 'bg-teal-50 dark:bg-teal-900/40 border-[#00D1C1]/30 text-[#00D1C1]' : 'bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 text-slate-500'}`}>
+                      {emoji} {(users as string[]).length > 1 && (users as string[]).length}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className={`flex items-center gap-1 mt-1 ${isMine ? 'justify-end' : 'justify-start'}`}>
+                 <span className="text-[10px] text-slate-400 font-black uppercase tracking-widest">
+                  {isTemp ? 'Sending...' : new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>
-                
-                {isMine && (
-                  <div className="flex items-center">
-                    {msg.is_read ? (
-                      <div className="flex -space-x-1.5">
-                        <svg className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
-                        <svg className="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
-                      </div>
-                    ) : (
-                      <svg className="w-3.5 h-3.5 text-slate-300 dark:text-slate-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
-                    )}
-                  </div>
+                {isMine && !isTemp && (
+                   <svg className={`w-3 h-3 ${msg.is_read ? 'text-[#00D1C1]' : 'text-slate-300'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="3">
+                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7m-14 6l4 4L19 7" />
+                   </svg>
                 )}
               </div>
             </div>
           );
         })}
 
-        {isPartnerTyping && (
-          <div className="flex items-start animate-in fade-in slide-in-from-bottom-1 duration-300">
-            <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 px-4 py-2.5 rounded-2xl rounded-tl-none shadow-sm flex gap-1 items-center">
-              <span className="w-1.5 h-1.5 bg-slate-400 dark:bg-slate-600 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
-              <span className="w-1.5 h-1.5 bg-slate-400 dark:bg-slate-600 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
-              <span className="w-1.5 h-1.5 bg-slate-400 dark:bg-slate-600 rounded-full animate-bounce"></span>
+        {isAiTyping && (
+          <div className="flex flex-col items-start animate-fade-in">
+            <div className="bg-white dark:bg-slate-900 px-4 py-3 rounded-2xl rounded-tl-none border border-slate-100 dark:border-slate-800 shadow-sm flex items-center gap-2">
+              <div className="flex gap-1">
+                <div className="w-1.5 h-1.5 bg-[#00D1C1] rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                <div className="w-1.5 h-1.5 bg-[#00D1C1] rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <div className="w-1.5 h-1.5 bg-[#00D1C1] rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+              </div>
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Thinking</span>
             </div>
           </div>
         )}
       </div>
 
-      <div className="bg-white dark:bg-slate-950 p-4 pb-12 border-t border-slate-100 dark:border-slate-900 shadow-[0_-8px_30px_rgb(0,0,0,0.02)] dark:shadow-none transition-colors">
-        <form onSubmit={handleSend} className="flex gap-2.5 items-center max-w-4xl mx-auto">
-          <input 
-            type="text" 
-            placeholder="Type your message..." 
-            value={newMessage} 
-            onChange={handleInputChange}
-            onFocus={() => setSelectedMsgId(null)}
-            className="flex-1 px-5 py-3.5 bg-slate-50 dark:bg-slate-900/50 border-2 border-transparent rounded-full text-[15px] font-medium text-slate-900 dark:text-slate-100 focus:bg-white dark:focus:bg-slate-900 focus:border-indigo-500 outline-none transition-all placeholder:text-slate-400 dark:placeholder:text-slate-600"
-          />
-          <button 
-            type="submit" 
-            disabled={!newMessage.trim()} 
-            className="w-12 h-12 bg-indigo-600 text-white rounded-full shadow-lg shadow-indigo-200 dark:shadow-none flex items-center justify-center active:scale-90 transition-all disabled:opacity-20 disabled:scale-100 flex-shrink-0"
-          >
-            <svg className="w-5 h-5 rotate-90" fill="currentColor" viewBox="0 0 20 20">
-              <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path>
-            </svg>
+      <div className="p-4 pb-10 bg-white dark:bg-slate-950 border-t dark:border-slate-900">
+        <form onSubmit={handleSend} className="flex gap-2 max-w-4xl mx-auto relative">
+          <input type="text" placeholder="Type a message..." value={newMessage} onChange={(e) => setNewMessage(e.target.value)} disabled={isSending} className="flex-1 px-5 py-3.5 bg-slate-50 dark:bg-slate-900 rounded-full text-sm font-semibold outline-none border border-slate-200 dark:border-slate-800 focus:border-[#00D1C1] dark:text-white" />
+          <button type="submit" disabled={!newMessage.trim() || isSending} className="w-12 h-12 bg-[#00D1C1] text-white rounded-full flex items-center justify-center active:scale-90 transition-all shadow-lg">
+            {isSending ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="3"><path d="M5 12h14M12 5l7 7-7 7"></path></svg>}
           </button>
         </form>
       </div>

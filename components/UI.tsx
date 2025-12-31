@@ -114,17 +114,6 @@ export const Header: React.FC<{
   </header>
 );
 
-const AVATAR_GRADIENTS = [
-  'from-indigo-500 to-purple-600',
-  'from-teal-400 to-[#00D1C1]',
-  'from-orange-400 to-rose-500',
-  'from-sky-400 to-blue-600',
-  'from-pink-500 to-rose-600',
-  'from-emerald-400 to-teal-600',
-  'from-amber-400 to-orange-600',
-  'from-violet-500 to-fuchsia-600'
-];
-
 export const Avatar: React.FC<{
   name: string;
   imageUrl?: string;
@@ -146,16 +135,11 @@ export const Avatar: React.FC<{
     xl: "w-6 h-6"
   };
 
-  // Deterministic seed for avatar APIs
   const seed = encodeURIComponent(name);
-  
-  // Use DiceBear "Lorelei" style for beautiful, expressive character avatars
-  // These look professional, colorful, and "realistic" in a polished illustrative way
   const placeholderUrl = `https://api.dicebear.com/7.x/lorelei/svg?seed=${seed}&backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc,ffdfbf`;
 
   return (
     <div className={`relative inline-block transition-transform duration-500 hover:scale-110 active:scale-95 ${className}`}>
-      {/* Decorative Outer Ring for Premium Look */}
       <div className={`${sizes[size]} rounded-[30%] flex items-center justify-center p-[2px] bg-gradient-to-br from-[#00D1C1] via-[#F89D1B]/30 to-[#1B273F]/10 dark:from-[#00D1C1]/40 dark:to-slate-900 shadow-xl overflow-visible`}>
         <div className="w-full h-full rounded-[28%] bg-white dark:bg-slate-900 overflow-hidden relative flex items-center justify-center border-2 border-white dark:border-slate-950">
           <img 
@@ -164,15 +148,15 @@ export const Avatar: React.FC<{
             className="w-full h-full object-cover animate-fade-in"
             loading="lazy"
           />
-          {/* Glossy Overlay for "Realistic" Depth */}
           <div className="absolute inset-0 bg-gradient-to-tr from-black/5 via-transparent to-white/10 pointer-events-none" />
           <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/10 to-transparent pointer-events-none" />
         </div>
       </div>
       
-      {isOnline !== undefined && (
+      {/* Sasa inaonyesha kijani TU kama ni kweli yupo online */}
+      {isOnline === true && (
         <div className={`absolute -bottom-1 -right-1 ${statusSizes[size]} rounded-full border-[3px] border-white dark:border-slate-950 flex items-center justify-center z-20`}>
-          <span className={`w-full h-full rounded-full ${isOnline ? 'bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.7)] animate-pulse' : 'bg-slate-400 dark:bg-slate-600 shadow-none'}`} />
+          <span className="w-full h-full rounded-full bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.7)] animate-pulse" />
         </div>
       )}
     </div>

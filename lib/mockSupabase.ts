@@ -15,7 +15,7 @@ const STORAGE_KEYS = {
 const INITIAL_USERS: User[] = [
   { id: '1', email: 'alex@example.com', username: 'Alex Rivers', is_online: true, last_seen: new Date().toISOString() },
   { id: '2', email: 'sam@example.com', username: 'Sam Smith', is_online: false, last_seen: new Date().toISOString() },
-  { id: 'gemini', email: 'ai@gemini.com', username: 'Gemini AI Assistant', is_online: true, last_seen: new Date().toISOString() }
+  { id: 'gemini', email: 'ai@gemini.com', username: 'Fahari AI', is_online: true, last_seen: new Date().toISOString() }
 ];
 
 const getStoredData = <T,>(key: string, defaultValue: T): T => {
